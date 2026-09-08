@@ -1,0 +1,322 @@
+<?php
+
+/**
+ * View renderer
+ * @property-read string $_content
+ * @property-read string|null $_trash
+ */
+class Loco_mvc_View implements IteratorAggregate {
+
+    private Loco_mvc_ViewParams $scope;
+    
+    /**
+     * View that is decorating current view
+     */
+    private ?self $parent = null;
+    
+    /**
+     * Current template as full path to PHP file
+     */
+    private string $template = '';
+    
+    /**
+     * Current working directory for finding templates by relative path
+     */
+    private string $cwd;
+
+    /**
+     * Name of current output buffer
+     */
+    private string $name = '';
+
+
+    /**
+     * @internal
+     */
+    public function __construct( array $args = [] ){
+        $this->scope = new Loco_mvc_ViewParams( $args );
+        $this->cwd = loco_plugin_root().'/tpl';
+    }
+    
+    
+    /**
+     * Change base path for template paths
+     * @param string $path relative to current directory
+     */
+    public function cd( string $path ):self {
+        if( $path && '/' === substr($path,0,1) ){
+            $this->cwd = untrailingslashit( loco_plugin_root().'/tpl'.$path );
+        }
+        else {
+            $this->cwd = untrailingslashit( $this->cwd.'/'.$path );
+        }
+        return $this;
+    }    
+    
+
+    /**
+     * @internal
+     * Clean up if something abruptly stopped rendering before graceful end
+     */
+    public function __destruct(){
+        if( '' !== $this->name ){
+            ob_end_clean();
+        }
+    }
+
+
+    /**
+     * Render error screen HTML
+     */
+    public static function renderError( Loco_error_Exception $e ):string {
+        $view = new Loco_mvc_View;
+        try {
+            $view->set( 'error', $e );
+            return $view->render( $e->getTemplate() );
+        }
+        catch( Throwable $e ){
+            return '<h1>'.esc_html( $e->getMessage() ).'</h1>';
+        }
+    }
+
+
+    /**
+     * Make this view a child of another template. i.e. decorate this with that.
+     * Parent will have access to original argument scope, but separate from now on
+     * @return self the parent view
+     */
+    private function extend( string $tpl ):self {
+        $this->parent = new Loco_mvc_View;
+        $this->parent->cwd = $this->cwd;
+        $this->parent->setTemplate( $tpl );
+        return $this->parent;
+    }
+
+
+    /**
+     * After start is called any captured output will be placed in the named variable
+     */
+    private function start( string $name ):void {
+        $this->stop();
+        $this->scope[$name] = null;
+        $this->name = $name;
+    }
+
+
+    /**
+     * When stop is called, buffered output is saved into current variable for output by parent template, or at end of script.
+     */
+    private function stop():void {
+        $content = ob_get_contents();
+        ob_clean();
+        $b = $this->name;
+        if( '' !== $b ){
+            if( isset($this->scope[$b]) ){
+                $content = $this->scope[$b].$content;
+            }
+            $this->scope[$b] = new _LocoViewBuffer($content);
+        }
+        $this->name = '_trash';
+    }
+
+
+    /**
+     * Output a captured block buffer, as long as it's valid
+     */
+    private function block( string $name ):void {
+        if( $this->has($name) ){
+            $view = $this->get($name);
+            if( $view instanceof _LocoViewBuffer ){
+                echo $view->__toString();
+            }
+        }
+    }
+
+
+    /**
+     * {@inheritDoc}
+     */
+    #[ReturnTypeWillChange]
+    public function getIterator(){
+        return $this->scope;
+    }
+
+
+    /**
+     * @internal
+     * @return mixed
+     */
+    public function __get( string $prop ){
+        return $this->has($prop) ? $this->get($prop) : null;
+    }
+
+
+    /**
+     * Test if a view argument exists
+     */
+    public function has( string $prop ):bool {
+        return $this->scope->offsetExists($prop);
+    }
+
+
+    /**
+     * Get property after checking with self::has
+     * @return mixed
+     */
+    public function get( string $prop ){
+        return $this->scope[$prop];
+    }
+
+
+    /**
+     * Set a view argument
+     */
+    public function set( string $prop, $value ):self {
+        $this->scope[$prop] = $value;
+        return $this;
+    }
+
+
+    /**
+     * Remove a view argument
+     */
+    public function unset( string $prop ):void {
+        $this->scope->offsetUnset($prop);
+    }
+    
+
+    /**
+     * Main entry to rendering complete template
+     * @param string $tpl template name excluding extension
+     * @param array|null $args extra arguments to set in view scope
+     * @param self|null $parent parent view rendering this view
+     */
+    public function render( string $tpl, ?array $args = null, ?Loco_mvc_View $parent = null ):string {
+        if( '' !== $this->name ){
+            return $this->fork()->render( $tpl, $args, $this );
+        }
+        $this->setTemplate($tpl);
+        if( $parent && $this->template === $parent->template ){
+            throw new Loco_error_Exception('Avoiding infinite loop');
+        }
+        if( is_array($args) ){
+            foreach( $args as $prop => $value ){
+                $this->set($prop, $value);
+            }
+        }
+        ob_start();
+        $content = $this->buffer();
+        ob_end_clean();
+        return $content;
+    }
+
+
+
+    /**
+     * Do actual render of currently validated template path
+     * @return string content not captured in sub-blocks
+     */
+    private function buffer():string {
+        $this->start('_trash');
+        $this->execTemplate( $this->template );
+        $this->stop();
+        $this->name = '';
+        // decorate via parent view if there is one
+        if( $this->parent ){
+            $this->parent->scope = clone $this->scope;
+            $this->parent->set('_content', $this->_trash );
+            return $this->parent->buffer();
+        }
+        // else at the root of view chain
+        return (string) $this->_trash;
+    }
+
+
+
+    /**
+     * Single entry point for setting current template
+     * @param string $tpl Path to template, excluding file extension
+     */
+    public function setTemplate( string $tpl ):void {
+        $file = new Loco_fs_File( $tpl.'.php' );
+        $path = $file->normalize( $this->cwd );
+        $root = Loco_fs_File::abs( loco_plugin_root().'/tpl/' );
+        // User input should be blocked from here, so the following is to catch developer errors.
+        if( ! str_starts_with($path,$root) ){
+            throw new Loco_error_Exception('Bad template path: '.$tpl.' => '.$path );
+        }
+        else if( ! $file->exists() ){
+            throw new Loco_error_Exception('Template not found: '.str_replace($root,'',$path) );
+        }
+        $this->cwd = $file->dirname();
+        $this->template = $file->getPath();
+    }
+
+
+    private function fork():self {
+        $view = new Loco_mvc_View;
+        $view->cwd = $this->cwd;
+        $view->scope = clone $this->scope;
+        
+        return $view;
+    }
+
+
+    /**
+     * Do actual runtime template include
+     */
+    private function execTemplate( string $template ):void {
+        $params = $this->scope;
+        // Parameter input should be sanitized, but here we log developer error
+        if( $params->has('template') || $params->has('params')){
+            Loco_error_Debug::trace('Template arguments attempted to override local variables');
+        }
+        extract( $params->getArrayCopy(), EXTR_SKIP  );
+        include $template;
+    }
+
+
+    /**
+     * Link generator
+     * @param string $route page route, e.g. "config"
+     * @param array $args optional page arguments
+     */
+    public function route( string $route, array $args = [] ):Loco_mvc_ViewParams {
+        return new Loco_mvc_ViewParams(  [
+            'href' => Loco_mvc_AdminRouter::generate( $route, $args ),
+        ] );
+    }
+
+
+    /**
+     * Shorthand for `echo esc_html( sprintf( ...`
+     */
+    private static function e( string $text ):string {
+        if( 1 < func_num_args() ){
+            $args = func_get_args();
+            $text = call_user_func_array( 'sprintf', $args );
+        }
+        echo htmlspecialchars( $text, ENT_COMPAT, 'UTF-8' );
+        return '';
+    }
+
+}
+
+
+
+/**
+ * @internal
+ */
+class _LocoViewBuffer {
+    
+    private string $s;
+
+    public function __construct( string $s ){
+        $this->s = $s;
+    }
+
+    public function __toString(){
+        return $this->s;
+    }    
+    
+}
