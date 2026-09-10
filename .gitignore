@@ -1,0 +1,44 @@
+# Секреты
+.env
+.env.local
+.env.*.local
+
+# WordPress ядро
+wp/wp-admin/
+wp/wp-includes/
+
+# Стандартные плагины и темы (не наши)
+wp/wp-content/plugins/
+wp/wp-content/themes/
+wp/wp-content/languages/
+wp/wp-content/upgrade/
+wp/wp-content/cache/
+
+# Но НАШИ плагины - оставляем:
+!wp/wp-content/mu-plugins/
+!wp/wp-content/mu-plugins/*
+
+# Изображения: КОММИТИМ для портфолио
+# (удалите следующую строку, если не хотите коммитить)
+# wp/wp-content/uploads/
+
+# Vendor и зависимости
+vendor/
+public/
+node_modules/
+
+# Логи
+*.log
+wp/wp-content/debug.log
+error_log
+
+# IDE и OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.swp
+
+# Временные файлы
+wp/wp-content/upgrade-temp-backup/
+wp/wp-content/wflogs/
